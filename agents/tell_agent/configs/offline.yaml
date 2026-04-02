@@ -1,0 +1,419 @@
+run:
+  runs: 1
+  agent: tell_agent
+  game:
+  - sb26
+  - cn04
+  - ar25
+  - tu93
+  - vc33
+  - m0r0
+  - ka59
+  - cd82
+  - su15
+  - tn36
+  - re86
+  - tr87
+  - r11l
+  - sk48
+  - lp85
+  - bp35
+  - lf52
+  - g50t
+  - wa30
+  - sp80
+  - ls20
+  - sc25
+  - ft09
+  - s5i5
+  - dc22
+  env_dir: ARC-AGI/environment_files
+  tags: offline,competition-test
+  parallel_jobs: 8
+workspace:
+  template_workspace: agents/tell_agent/template_workspace_empty
+  backend: directory
+  size_limit: 32KB
+  preserve_image: false
+  cleanup_stale: true
+env:
+  # ANTHROPIC_API_KEY is read from environment or .env file
+  CLAUDE_THINKING_TYPE: adaptive
+  CLAUDE_OUTPUT_EFFORT: high
+  MAX_ACTIONS: 2048
+  LOG_DIR: run_logs/offline
+  TELL_AGENT_MODEL: claude-opus-4-6
+  TELL_MAX_OUTPUT_TOKENS: 32768
+  TELL_SHELL_TIMEOUT: 300
+  TELL_BASH_OUTPUT_MAX_CHARS: 32768
+  TELL_STAGE_MAX_TURNS: 512
+  TELL_ACTION_WAIT_TIMEOUT: 40
+  TELL_WORKER_POLL_INTERVAL: 0.5
+  TELL_RECENT_FRAMES_LIMIT: 12
+  TELL_RUNTIME_HOST: 127.0.0.1
+  TELL_RUNTIME_PORT: 8000
+  TELL_RUNTIME_PORT_TRIES: 32
+  TELL_RENDER_SCALE: 2
+  LLM_ERROR_RETRIES: 5
+  LLM_ERROR_RETRY_DELAY: 16
+  LLM_ERROR_RETRY_MAX_DELAY: 60
+  LLM_REQUEST_TIMEOUT: 600
+  LLM_TEMPERATURE: 1.0
+  LLM_TOP_P: 1.0
+  OPERATION_MODE: offline
+  ENVIRONMENTS_DIR: ARC-AGI/environment_files
+llm:
+  request_budget:
+    max_requests_per_run: 512
+tools:
+- name: bash_exec
+  description: Run bash command. cwd is already the workspace — do NOT cd or use absolute paths. Absolute paths and parent traversal are blocked.
+  parameters:
+    type: object
+    properties:
+      id:
+        type: string
+        description: Session identifier for command continuity.
+      exec_dir:
+        type: string
+        description: Optional relative directory inside workspace.
+      command:
+        type: string
+        description: Command to execute.
+    required:
+    - command
+- name: screen_shot
+  description: Return a screenshot image of the latest game state only.
+  parameters:
+    type: object
+    properties: {}
+    required: []
+- name: write_file
+  description: Write content to a file in the workspace. Creates parent directories if needed. Overwrites existing file.
+  parameters:
+    type: object
+    properties:
+      path:
+        type: string
+        description: Relative path inside the workspace (e.g., "MEMORY.md", "scripts/solve.py").
+      content:
+        type: string
+        description: File content to write.
+    required:
+    - path
+    - content
+compaction:
+  enabled: true
+  max_context_tokens: 131072
+  trigger_ratio: 0.8
+  max_context_clears_per_run: 128
+  keep_recent_messages: 0
+  recent_facts_budget: 10000
+  multi_round_enabled: false
+  max_rounds: 1
+  tool_names: ''
+  pin_first_user_message: true
+  summary_max_tokens: 32768
+  summary_prompt: 'Provide a detailed summary for continuing the conversation above.
+
+    Focus on information that would be helpful for continuing the conversation,
+
+    including what we did, what we''re doing, and what we''re going to do next.
+
+    The summary will be used so that another agent can read it and continue the work.
+
+
+    Use this template:
+
+    ---
+
+    ## Goal
+
+    [What goal(s) is the agent trying to accomplish?]
+
+
+    ## Instructions
+
+    - [What important instructions were given that are still relevant]
+
+    - [If there is a plan or spec, include it so the next agent can continue]
+
+
+    ## Discoveries
+
+    [What notable things were learned that would be useful for the next agent]
+
+
+    ## Accomplished
+
+    [What work has been completed, what is still in progress, and what is left?]
+
+
+    ## Next steps
+
+    [Concrete action plan for continuing]
+
+    ---
+
+    '
+  summary_user_template: 'Summarize our conversation so far for handoff to the next agent.
+
+
+    Original task context:
+
+    {FIRST_USER_MESSAGE}
+
+
+    Latest context:
+
+    {LATEST_USER_MESSAGE}
+
+
+    Compacted history:
+
+    {COMPACTION_SUMMARY}
+
+    '
+memory_checkpoint_clear:
+  enabled: true
+  memory_path: MEMORY.md
+  max_grace_turns: 1
+history_log:
+  enabled: false
+  path: ../history_{RUN_ID}.jsonl
+prompts:
+  tools:
+  - bash_exec
+  - screen_shot
+  - write_file
+  resume_policy:
+    on_level_up: keep
+    on_action_submitted: keep
+    on_context_limit: compact
+  reminders:
+    enable_game_reminder: false
+    enable_todo_reminder: false
+    enable_workspace_budget_reminder: auto
+    enable_context_budget_reminder: auto
+    context_budget_reminder_threshold: 1
+    todo_reminder_interval: 32
+    todo_empty: ''
+    todo: ''
+    game_initial: ''
+    game_update: ''
+    stage_resume: '<system-reminder>
+
+      Continue from where you left off.
+
+
+      Latest runtime context:
+
+      {LATEST_USER_PROMPT}
+
+      </system-reminder>
+
+      '
+    level_up: '<system-reminder>
+
+      Level up: {PREV_LEVEL} -> {NEW_LEVEL}.
+
+      Before acting on the new level: observe the new board, compare it to the nearest solved level, note what is the same and what changed.
+
+      Update MEMORY.md: record what rules or patterns level {PREV_LEVEL} confirmed or revealed, then note what looks different in level {NEW_LEVEL}.
+
+      </system-reminder>
+
+      '
+    stage_resume_level_up: ''
+    stage_resume_action_submitted: ''
+    context_cleared: '<system-reminder>
+
+      Context was compacted to free space. Continue from the latest runtime context below.
+
+
+      {LATEST_USER_PROMPT}
+
+      </system-reminder>
+
+      '
+    memory_checkpoint: '<system-reminder>
+
+      Context is at {CONTEXT_OBSERVED_TOKENS}/{CONTEXT_TRIGGER_TOKENS} tokens.
+
+      Rewrite {MEMORY_CHECKPOINT_PATH} now as a short durable handoff for your future self.
+
+      Follow the MEMORY.md structure defined in the workspace instructions.
+
+      Keep only durable state: current goal, stable rules, important discoveries, solved progress, next steps, and exact evidence anchors only when needed.
+
+      Do not dump the transcript.
+
+      As soon as the write succeeds, context will be cleared and the task will resume from fresh context.
+
+      </system-reminder>
+
+      '
+    memory_checkpoint_final: '<system-reminder>
+
+      Final reminder before stopping.
+
+      In this response, write {MEMORY_CHECKPOINT_PATH} using the workspace MEMORY.md structure.
+
+      Keep only durable state; do not dump transcript.
+
+      If this response does not successfully write that file, the run will stop.
+
+      </system-reminder>
+
+      '
+  fragments:
+    environment: "## Runtime & Tools\n- All tools (`bash_exec`, `write_file`) run in the workspace already. Use relative paths only (e.g., `python3 arc_utils.py`, `MEMORY.md`). Never use absolute paths\
+      \ or `cd`.\n- `MEMORY.md` is in the current directory.\n- `arc_utils.py` is the runtime helper:\n  - `get_latest_observation()` -> latest state/action-result dict (free)\n  - `get_observations(\"\
+      0\")` -> one action-result dict, `get_observations(\"0:3\")` -> list (free)\n  - `ActionSession(budget, plan)` -> budgeted action session\n- `ActionSession.step(...)` returns one action-result dict\
+      \ with `frames: list[str]`.\n  - `len(frames) == 1` usually means the action resolved instantly to its final state.\n  - `len(frames) > 1` means the action triggered an animation — a continuous visual\
+      \ transition to the final state. The animation itself often conveys information (e.g., an object moving along a path, a chain reaction, a reversal). Inspect the full frame sequence to understand what\
+      \ happened, not just the final frame.\n  - Failed or ignored requests raise `ActionSessionError`.\n- `s.remaining` and `s.used` report action budget state.\n- Budget is clamped to `HARD_ACTION_LIMIT`\
+      \ (={HARD_ACTION_LIMIT}). Use `verified=True, evidence=\"...\"` only for proven solutions.\n\n## Color Legend\nASCII frames use single characters for 16 colors:\n| Char | Color        | Char | Color\
+      \       |\n|------|--------------|------|-------------|\n| `W`  | white        | `B`  | blue        |\n| `w`  | off-white    | `b`  | light-blue  |\n| `.`  | light-gray   | `Y`  | yellow      |\n\
+      | `:`  | gray         | `O`  | orange      |\n| `d`  | dark-gray    | `n`  | maroon      |\n| `K`  | black        | `G`  | green       |\n| `M`  | magenta      | `u`  | purple      |\n| `p`  | pink\
+      \         |      |             |\n\nUse this legend when parsing frames. Same character = same color across all frames.\n\n## Runtime Snippets\n```python\n# Read current state (free)\nimport arc_utils\
+      \ as au\nobs = au.get_latest_observation()\nprint(\n    obs[\"current_level\"],\n    obs[\"state\"],\n    obs[\"total_actions\"],\n    obs[\"last_action\"],\n    obs[\"available_actions\"],\n)\n```\n\
+      ```python\n# One ActionSession per bash_exec. Keep the batch small.\nfrom arc_utils import ActionSession, ActionSessionError\ns = ActionSession(budget=3, plan=\"test if right moves the player\")\n\
+      try:\n    for a in [\"right\", \"down\"]:\n        obs = s.step(a)\n        frames = obs.get(\"frames\", [])\n        print(obs[\"state\"], obs[\"current_level\"], f\"frames={len(frames)}\")\n   \
+      \     for i, frame in enumerate(frames, start=1):\n            print(f\"[frame {i}/{len(frames)}]\")\n            print(frame)\nexcept ActionSessionError as e:\n    print(e)\nprint(f\"used={s.used}\
+      \ remaining={s.remaining}\")\n```\n```python\n# Click action (x=column, y=row)\nfrom arc_utils import ActionSession, ActionSessionError\ns = ActionSession(budget=1, plan=\"click at suspected button\
+      \ position\")\ntry:\n    obs = s.step(\"click\", x=12, y=7)\n    frames = obs.get(\"frames\", [])\n    print(obs[\"state\"], f\"frames={len(frames)}\")\n    for i, frame in enumerate(frames, start=1):\n\
+      \        print(f\"[frame {i}/{len(frames)}]\")\n        print(frame)\nexcept ActionSessionError as e:\n    print(e)\n```\n```python\n# Verified solution replay\nfrom arc_utils import ActionSession,\
+      \ ActionSessionError\ns = ActionSession(\n    budget=20,\n    plan=\"replay level 2 solution\",\n    verified=True,\n    evidence=\"cleared level 2 with R-R-D-D-L in previous attempt\",\n)\ntry:\n\
+      \    for a in [\"right\", \"right\", \"down\", \"down\", \"left\"]:\n        obs = s.step(a)\n        if obs[\"state\"] == \"game_over\":\n            print(obs[\"state\"])\n            break\nexcept\
+      \ ActionSessionError as e:\n    print(e)\n```\n"
+    lifecycle: '## Context Lifecycle
+
+      Normal resume restores both recent conversation context and workspace files.
+
+      Do not restart analysis from zero after a normal resume.
+
+      When context is explicitly compacted, the durable state is `MEMORY.md` plus workspace files.
+
+      After a context clear, re-ground from `MEMORY.md` and the latest runtime context before acting.
+
+      When asked to checkpoint memory, rewrite `MEMORY.md` as a short durable handoff, not a transcript dump.
+
+      '
+    analysis: "## Analysis & Action Rules\n\n### Observation & State\n- `current_level` increase = level solved. Do not rely on `state == win` except for final completion.\n- `state` values: `not_finished`,\
+      \ `win`, `game_over`. On `game_over`, only `reset` has effect.\n- `available_actions` lists what the API accepts, not what will change state.\n- Reading observations is free; only `s.step()` costs\
+      \ budget.\n- `<game-status>` appears in tool results after each game action. Use it to track action count and judge whether the current approach is paying off.\n- Parse boards with Python; do not\
+      \ rely on visual scanning of ASCII grids.\n\n### Reasoning Loop\n- Before each batch, decide: is the bottleneck missing understanding, a broken step in a known approach, or just execution?\n  - Missing\
+      \ understanding → probe (budget 1-3, answer one question)\n  - Broken step → patch (fix one failure, keep the rest)\n  - Ready to solve → solve (execute the full approach)\n- Prefer the cheapest action\
+      \ that resolves the leading uncertainty.\n- When the next step is already clear, execute instead of re-explaining.\n- Stop exploring and start solving when your approach survives two nontrivial predictions.\n\
+      - Most games are predominantly move-driven or click-driven. Infer the dominant control mode early and bias tests toward it.\n- When choosing between tests, prefer the test that best separates competing\
+      \ hypotheses.\n\n### Multi-frame Actions\n- Some actions trigger animations (multiple frames). The animation sequence often reveals important information: movement paths, chain reactions, collisions,\
+      \ reversals.\n- Do not discard intermediate frames. When an action produces an unexpected animation, inspect the full sequence to understand what happened.\n\n### Reuse Across Levels\n- At each new\
+      \ level, first compare it to the nearest solved level. State what is the same, what changed, and what is uncertain.\n- If an existing approach explains the new level, use it directly with minimal\
+      \ adaptation. If a stored pattern almost fits, skip re-derivation and go straight to one short probe or direct solve.\n- If two concrete predictions from a reused approach fail, stop patching and\
+      \ reconsider the approach from current evidence.\n- Default assumption: reuse is more likely than total novelty unless evidence says otherwise.\n\n### Unexpected Results\n- Locate the exact action\
+      \ where prediction failed. Inspect the resulting frames.\n- Distinguish understanding failure from execution failure. If a long sequence matched prediction until late, fix the late steps first rather\
+      \ than discarding the whole approach.\n- Do not jump to a broad new theory without first checking whether a small fix explains the failure.\n\n### Efficiency Discipline\n- Monitor `<game-status>`\
+      \ after each action. If actions on the current level are growing well beyond your solved-level average, pause and ask whether the current approach is actually making progress or just burning budget.\n\
+      - Avoid long brute-force sweeps unless the expected information gain justifies the action cost.\n- Do not spend many turns re-explaining the entire board. Use whole-board parsing only when it materially\
+      \ changes your understanding.\n\n### Reset Discipline\n- On `game_over`, reset immediately — it is the only available action.\n- Voluntary reset (when `state != game_over`) is for recovery from irrecoverably\
+      \ broken boards, not for retrying with a clean slate.\n- Before every voluntary reset, write one line to MEMORY.md: what you tried, what you learned, and what you will do differently next time.\n\
+      - If you have reset the same level 3+ times with similar opening moves, you are in a loop. The next attempt MUST use a materially different strategy.\n- Before a voluntary reset, ask: is the board\
+      \ still salvageable? Can I recover from the current state instead of starting over?\n- Avoid redundant confirmation. If a test only repeats a prediction that already succeeded, skip it.\n\n### When\
+      \ Stuck\nIf your current approach is not making progress — actions on this level significantly exceed solved levels, or repeated attempts yield similar failures:\n- Stop acting and write a `## Stuck\
+      \ Diagnostic` to MEMORY.md: what was tried, what was ruled out, and what remains unknown. This is mandatory before continuing.\n- Consider what might help: rereading MEMORY.md for unverified assumptions,\
+      \ reviewing past observations via `get_observations()`, generating a qualitatively different hypothesis, or trying a completely different interaction style.\n- Do not keep repeating the same failing\
+      \ approach. If you continue after a Stuck Diagnostic, it must be with a materially different strategy or new information.\n"
+    action_protocol: "## Action Execution\n- Every action sequence requires `ActionSession(budget=N, plan=\"...\")`. Choose the smallest budget that can test or execute the current plan.\n- For verified\
+      \ solutions, use `ActionSession(budget=N, plan=\"...\", verified=True, evidence=\"...\")` to exceed the hard limit.\n- Check `obs[\"state\"]` after each step. On `game_over`, issue `s.step(\"reset\"\
+      )` before continuing.\n- Use distinct batch types:\n  - probe = answer one unresolved question (budget 1-3)\n  - patch = fix one local failure while keeping the current approach (budget 1-5)\n  -\
+      \ solve = execute a trusted approach to advance the board (budget 5-10)\n  Decide the batch type before acting. Do not mix goals in one batch.\n- In a solve batch, do not pause for routine confirmation\
+      \ after every obvious step. Confirm only at checkpoints or after meaningful uncertainty.\n- If `MEMORY.md` records solutions for already-solved levels, replay them directly with verified=True to conserve\
+      \ budget.\n- If repeated solve attempts fail, ask: is the understanding wrong or only the execution? If two failures differ only in late ordering, patch the execution rather than discarding the whole\
+      \ approach.\n- After a checkpoint or resume on the same level, re-open with one observation, state what you trust, what is uncertain, and what the next batch is. Do not restart a long analysis.\n"
+    workspace: "## Memory & Workspace\n- The workspace is capacity-limited ({WORKSPACE_SIZE_LIMIT}).\n- `MEMORY.md` is the durable cross-turn memory. Use it to preserve stable rules, reusable patterns,\
+      \ solved-level solutions, current-level state, and failure notes.\n- Update `MEMORY.md` at level transitions, after important discoveries or falsifications, and when the system asks for a checkpoint.\n\
+      - For checkpoint rewrites, keep only durable state; do not dump transcript.\n- Preferred sections:\n  - `## Goal` — one-line game objective\n  - `## Stable Rules` — action-effect map, grid layout\
+      \ rules, invariants that survived multiple levels\n  - `## Patterns` — reusable named patterns with: definition, trigger, prediction, evidence, known exceptions\n  - `## Solved Levels` — per-level:\
+      \ shortest solution sequence, which pattern it used, any level-specific notes\n  - `## Current Level` — objective, nearest solved analogue, what changed, leading uncertainty, next batch\n  - `## Failed\
+      \ Ideas` — falsified approaches with the evidence that killed them\n- Write rules in general terms, not coordinates. Use coordinates as evidence, not the rule itself.\n- When a belief is falsified,\
+      \ overwrite it clearly rather than appending contradictions.\n- During routine replay of solved levels, do not rewrite MEMORY.md unless something contradicts the stored solution.\n- On final win,\
+      \ rewrite MEMORY.md into a compact game manual.\n- For throwaway scripts, use `python -c` or `python << 'EOF'` in `bash_exec` to avoid writing files.\n- `<workspace-budget>` in tool results shows\
+      \ current usage. Exceeding the limit fails with exit code 122.\n"
+  system: 'You are an autonomous agent solving a grid-based puzzle game.
+
+    Your job is to solve levels efficiently — fewer actions = better score.
+
+
+    Working method:
+
+    1. Discover: systematically test what each action does.
+
+    2. Understand: identify stable rules and reusable patterns.
+
+    3. Solve: execute the shortest reliable approach.
+
+    4. Reuse: apply known patterns to new levels with minimal re-exploration.
+
+
+    At each decision point, ask:
+
+    - What do I believe the game does, and what evidence supports it?
+
+    - What is the cheapest next step that would make progress or resolve uncertainty?
+
+    - What result would prove my current understanding wrong?
+
+
+    Be concise, direct, and evidence-driven.
+
+    When the next step is clear, act instead of explaining.
+
+    Default to a reasonable interpretation and act; do not stall for perfect certainty.
+
+    When repeated attempts fail, admit the approach may be wrong and rebuild from fresh evidence.
+
+    When asked to checkpoint memory, rewrite MEMORY.md as a short durable handoff.
+
+    '
+  user: '{frag:environment}
+
+
+    {frag:lifecycle}
+
+
+    {frag:analysis}
+
+
+    {frag:action_protocol}
+
+
+    {frag:workspace}
+
+
+    ---
+
+
+    ## Current Runtime Context
+
+    - `state_id`: {STATE_ID}
+
+    - `state`: {STATE}
+
+
+    ## Current MEMORY.md
+
+    ```markdown
+
+    {file:MEMORY.md}
+
+    ```
+
+
+    Start from the current runtime context, the latest observations, and the current MEMORY.md.
+
+    Decide whether the bottleneck is understanding, repair, or execution.
+
+    Then act with a probe, patch, or solve batch.
+
+    '

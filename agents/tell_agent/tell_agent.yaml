@@ -1,0 +1,872 @@
+run:
+  runs: 8
+  agent: tell_agent
+  game: [ls20, ft09, vc33, lp85]
+  # game: [ft09]
+  env_dir: ../ARC-AGI/environment_files
+  tags: local,dev
+  parallel_jobs: 2
+
+workspace:
+  # auto | directory | disk_image
+  backend: auto
+  # Workspace size cap. On macOS, auto uses a hard-limited disk image when available.
+  size_limit: 2KB
+  preserve_image: false
+  cleanup_stale: true
+
+env:
+  # Keys under env are exported by run_all_tasks.sh and read by tell agent config loader.
+  # ANTHROPIC_API_KEY is read from environment or .env file
+  MAX_ACTIONS: 32768
+  LOG_DIR: run_logs/dev
+  TELL_AGENT_MODEL: claude-opus-4-6
+  TELL_MAX_OUTPUT_TOKENS: 32768
+  TELL_SHELL_TIMEOUT: 300
+  TELL_BASH_OUTPUT_MAX_CHARS: 8000
+  TELL_STAGE_MAX_TURNS: 1024
+  TELL_ACTION_WAIT_TIMEOUT: 40
+  TELL_WORKER_POLL_INTERVAL: 0.5
+  TELL_RECENT_FRAMES_LIMIT: 12
+  TELL_RUNTIME_HOST: 127.0.0.1
+  TELL_RUNTIME_PORT: 8000
+  TELL_RUNTIME_PORT_TRIES: 32
+  TELL_RENDER_SCALE: 2
+  LLM_ERROR_RETRIES: 8
+  LLM_ERROR_RETRY_DELAY: 16
+  LLM_ERROR_RETRY_MAX_DELAY: 120
+  LLM_REQUEST_TIMEOUT: 480
+  LLM_TEMPERATURE: 1.0
+  LLM_TOP_P: 1.0
+  CLAUDE_THINKING_TYPE: adaptive
+  CLAUDE_OUTPUT_EFFORT: high
+
+llm:
+  max_tokens_retry:
+    enabled: true
+    max_retries: 2
+    reminder_message: |
+      <system-reminder>
+      Your output may be too long. Please keep the response within {TELL_MAX_OUTPUT_TOKENS} tokens.
+      </system-reminder>
+  empty_response_recovery:
+    enabled: true
+    reminder_message: |
+      <system-reminder>
+      Your response may be too empty. Please continue and complete the task.
+      </system-reminder>
+
+tools:
+  - name: bash_exec
+    description: Run bash command in the agent workspace only. Absolute paths and parent traversal are blocked.
+    parameters:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Session identifier for command continuity.
+        exec_dir:
+          type: string
+          description: Optional relative directory inside workspace.
+        command:
+          type: string
+          description: Command to execute.
+      required: [command]
+  - name: view_game
+    description: Render a selected observation window from runtime history. Returns PNG for single-frame view, MP4 for dynamic multi-frame window. Use video when tracking motion/change, and single frame when inspecting static details.
+    parameters:
+      type: object
+      properties:
+        from_before:
+          type: integer
+          description: Older bound offset from latest observation. 0 means latest.
+        to_before:
+          type: integer
+          description: Newer bound offset from latest observation. 0 means latest.
+        include_actions:
+          type: boolean
+          description: Include actions aligned with selected observation steps.
+      required: []
+  - name: todo_write
+    description: Update todos from the input array; add when id is new, overwrite when id exists.
+    parameters:
+      type: object
+      properties:
+        todos:
+          type: array
+          description: Full todo payload to apply. Each item is upserted by id.
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: Stable todo identifier used for upsert.
+              content:
+                type: string
+                description: Task text shown to the model in reminders.
+              status:
+                type: string
+                description: Execution status of this todo item.
+                enum: [pending, in_progress, completed, cancelled]
+              priority:
+                type: string
+                description: Priority level for planning and ordering.
+                enum: [high, medium, low]
+            required: [id, content, status, priority]
+      required: [todos]
+
+compaction:
+  enabled: true
+  max_context_tokens: 512000
+  trigger_ratio: 0.8
+  keep_recent_messages: 5
+  summary_max_tokens: 16384
+
+prompts:
+
+  workflow:
+    entry_stage: hypothesis
+    stages:
+      hypothesis:
+        prompt_ref: hypothesis
+        tools: ["bash_exec", "view_game", "todo_write", "run_deep_analysis"]
+        transitions:
+          - type: default
+            to: plan
+      plan:
+        prompt_ref: plan
+        tools: ["bash_exec", "view_game", "todo_write", "run_deep_analysis"]
+        transitions:
+          - type: default
+            to: actions
+      actions:
+        prompt_ref: actions
+        tools: ["bash_exec", "view_game", "todo_write", "run_deep_analysis"]
+        transitions:
+          - type: default
+            to: verify
+      verify:
+        prompt_ref: verify
+        tools: ["bash_exec", "view_game", "todo_write", "run_deep_analysis"]
+        transitions:
+          - type: match
+            pattern: "@UPDATE_POLICY"
+            to: policy
+          - type: match
+            pattern: "@TRY_POLICY"
+            to: try_policy
+          - type: match
+            pattern: "@GO_PLAN"
+            to: plan
+          - type: match
+            pattern: "@GO_HYPOTHESIS"
+            to: hypothesis
+          - type: default
+            to: hypothesis
+      policy:
+        prompt_ref: policy
+        tools: ["bash_exec", "view_game", "todo_write", "run_deep_analysis"]
+        transitions:
+          - type: default
+            to: try_policy
+      try_policy:
+        prompt_ref: try_policy
+        tools: ["bash_exec", "view_game", "todo_write", "run_deep_analysis"]
+        transitions:
+          - type: default
+            to: verify
+
+  reminders:
+    todo_empty: |
+      <system-reminder>
+      This is a reminder that your todo list is currently empty. DO NOT mention 
+      this to the user explicitly because they are already aware. If you are 
+      working on tasks that would benefit from a todo list please use the 
+      TodoWrite tool to create one. If not, please feel free to ignore. Again 
+      do not mention this message to the user.
+      </system-reminder>
+    todo: |
+      <system-reminder>
+      Current todo list:
+      {TODO_ITEMS}
+      Keep execution aligned with this list and update status immediately after each completed item.
+      </system-reminder>
+    game_initial: |
+      <game-reminder>
+      Initial game states:
+      current_level: {GAME_LEVEL}
+      current_state: {GAME_STATE}
+      available_actions: {GAME_AVAILABLE_ACTIONS}
+      game_image:
+      {GAME_IMAGE_DATA_URL}
+      </game-reminder>
+    game_update: |
+      <game-reminder>
+      Game states changed after your action
+      current_level: {GAME_LEVEL}
+      current_state: {GAME_STATE}
+      total_actions: {GAME_TOTAL_ACTIONS}
+      available_actions: {GAME_AVAILABLE_ACTIONS}
+      game_image:
+      {GAME_IMAGE_DATA_URL}
+      </game-reminder>
+
+  stages:
+    hypothesis:
+      system: |
+        You are the agent for a multi-level, turn-based grid video game.
+        Available stages:
+        - hypothesis: propose testable hypotheses from current evidence.
+        - plan: build a high-ROI verification plan.
+        - actions: execute plan via runtime API and collect evidence.
+        - verify: evaluate evidence and update memory.
+        - policy: summarize reusable level-solving policy.
+        - try_policy: execute policy and assess outcome.
+        Current stage: hypothesis (observe and hypothesize).
+        Transition Contract:
+        - Default next stage: `plan`.
+
+        You have access to the TodoWrite tool to help you manage and plan tasks.
+        Use this tool very frequently to track progress and keep visibility.
+        Mark items completed immediately when done. Do not batch multiple completions.
+        Perception rule: use `view_game` for visual grounding. For dynamic understanding, inspect a recent observation window (history); for static understanding, inspect the latest observation. Use grid APIs/scripts for precise computation and verification.
+        
+        Stage Contract:
+        - Produce actionable hypotheses for the next loop.
+        - Rewrite `memory/hypotheses/MEMORY.md` once in this stage.
+        - Rewrite `stage_report.md` exactly once in this stage.
+        - Return `stage complete` after required file writes succeed.
+
+        Mandatory:
+        - Inspect the current observation image.
+        - Propose testable, falsifiable hypotheses (high information gain, low-cost probes).
+        - Do not invent evidence.
+        - New hypotheses must be grounded in existing knowledge from `memory/knowledge/MEMORY.md`.
+        - For each rewritten hypothesis, state its relation to prior hypotheses in `memory/hypotheses/MEMORY.md`:
+          continue | refine | replace | conflict.
+        - Because this stage rewrites `memory/hypotheses/MEMORY.md`, preserve still-valid hypotheses and only revise what changed.
+
+        Write hypotheses to memory/hypotheses/MEMORY.md.
+        Write in clear Markdown with a human-readable style.
+        Keep structure elegant, but each hypothesis block must include these keys:
+        `id`, `claim`, `reason`, `rank`, `verification`, `status`, `confidence`, `relation_to_previous`.
+        Suggested style:
+        ```markdown
+        # hypotheses
+        ## <short hypothesis title>
+        ...
+        ## <short hypothesis title>
+        ...
+        ```
+        Any additional artifacts (notes/code) may go under memory/hypotheses/ and be referenced from memory/hypotheses/MEMORY.md.
+
+        Output Contract:
+        - `stage_report.md` is the handoff for the next stage.
+        - In `stage_report.md`, include: what you did, key evidence, why it matters, and unresolved uncertainties/constraints that may affect downstream decisions. Do not provide recommendations.
+        - Write `memory/hypotheses/MEMORY.md` exactly once (overwrite).
+        - After write succeeds, stop file operations in this stage.
+        - Then summarize the result in stage_report.md and return `stage complete`.
+        - Return plain text `stage complete` in chat after file writes succeed.
+
+      user: |
+        Stage Objective: produce updated, testable hypotheses for this loop.
+
+        Unified Stage Handoff (from previous stage):
+        ```markdown
+        {file:stage_report.md}
+        ```
+
+        Existing memory files (content):
+        - path: memory/knowledge/MEMORY.md
+        ```markdown
+        {file:memory/knowledge/MEMORY.md}
+        ```
+        - path: memory/hypotheses/MEMORY.md
+        ```markdown
+        {file:memory/hypotheses/MEMORY.md}
+        ```
+
+        Game Context:
+        - level: {LEVEL}
+        - state: {STATE}
+        - available_actions: {AVAILABLE_ACTIONS_JSON}
+
+        Deliverable:
+        - Rewrite `memory/hypotheses/MEMORY.md`.
+        - Rewrite `stage_report.md`.
+        - Return `stage complete`.
+
+    plan:
+      system: |
+        You are the agent for a multi-level, turn-based grid video game.
+        Available stages:
+        - hypothesis: propose testable hypotheses from current evidence.
+        - plan: build a high-ROI verification plan.
+        - actions: execute plan via runtime API and collect evidence.
+        - verify: evaluate evidence and update memory.
+        - policy: summarize reusable level-solving policy.
+        - try_policy: execute policy and assess outcome.
+        Current stage: plan.
+        Transition Contract:
+        - Default next stage: `actions`.
+
+        You have access to the TodoWrite tool to help you manage and plan tasks.
+        Use this tool very frequently to track progress and keep visibility.
+        Mark items completed immediately when done. Do not batch multiple completions.
+        Perception rule: use `view_game` for visual grounding. For dynamic understanding, inspect a recent observation window (history); for static understanding, inspect the latest observation. Use grid APIs/scripts for precise computation and verification.
+        
+        Stage Contract:
+        - Build a high-ROI verification plan for the Actions stage: keep downstream execution overhead low, while each execution objective validates/refutes multiple active hypotheses.
+        - Plan goals must be achievable with high probability under current evidence/knowledge; avoid brittle goals that require unproven assumptions.
+        - Do not execute actions in this stage.
+        - If you discover reusable code/analysis with future value, update `memory/skills/` and `memory/skills/MEMORY.md` immediately in this stage.
+        - As the final step of this stage, write `stage_report.md` exactly once (overwrite).
+
+        Runtime API (read-only, concise):
+        - Base URL: {RUNTIME_API_BASE}
+        - GET `/observation?format=grid` (grid only)
+        - GET `/history?kind=all|observation|action&limit=N&format=grid[&since_step=S]`
+        - `/observation` response: `{ok, step, format, observation}`.
+        - `observation` is a metadata object; the grid payload is `observation.grid`.
+        - `observation.grid` may be 2D (single frame) or 3D (multi-frame payload).
+        - `/history` defaults: `limit=3` and always returns observation payloads.
+        - `/history` response: `{ok, step, format, observations, actions}`; with `kind=all`, also `events`.
+        - `ok`: request accepted by runtime.
+        - `step`: latest runtime step index at response time.
+        - `format`: always `grid`.
+        - `observations`: list of observation events; each item contains `kind/step/at/observation`.
+        - `actions`: list of action events; each item contains `kind/step/at/action/x/y/source/message_id/state_id/loop_id`.
+        - `step`: timeline step index.
+        - `observation.frame_count`: number of frames inside one observation payload, not progress.
+        - Judge progress by state/grid deltas across steps; never by `frame_count`.
+        - Grid color palette:
+          0=white, 1=off-white, 2=light-gray, 3=gray, 4=dark-gray, 5=black,
+          6=magenta, 7=pink, 8=red, 9=blue, 10=light-blue, 11=yellow,
+          12=orange, 13=maroon, 14=green, 15=purple.
+
+        Mandatory:
+        - Read ALL active hypotheses in memory/hypotheses/MEMORY.md before planning.
+        - Ground plan objectives in what is already known to work; if uncertainty is high, design an easier intermediate objective first.
+        - Use the runtime API at {RUNTIME_API_BASE} to inspect the latest state (read-only).
+        - If you need exact coordinates/deltas/counts, fetch `format=grid`, save the response JSON under tmp/, then write a short script to extract ONLY the needed facts (counts, bounding boxes, diffs, coordinates).
+        - Never print or paste the full 64x64 grid into the model output. It wastes tokens. Output only compact derived information.
+        - Do NOT POST /action in this stage.
+        - Optimize for information efficiency: use the fewest actions to validate or eliminate as many hypotheses as possible.
+        - Prefer discriminative probes: one action should ideally separate multiple hypotheses.
+
+        Reusable Code Contract (memory/skills/):
+        - `memory/skills/` is the ONLY reusable code repository for this agent.
+        - `memory/skills/` content may include mistakes from earlier stages; when you find one, fix it and update `memory/skills/MEMORY.md`.
+        - If you create reusable helper code during planning, write it under `memory/skills/`.
+        - Register or update reusable code entries in `memory/skills/MEMORY.md`.
+        - Keep each entry concise: signature, purpose, path, short note.
+        - Reuse existing skills code before creating new files.
+        - Example: write a reusable helper that reads two observations from the API and summarizes only the meaningful delta.
+
+        Output Contract:
+        - `stage_report.md` is the handoff for the next stage.
+        - In `stage_report.md`, include: what you planned, key assumptions/evidence, and execution context (constraints, dependencies, measurable checkpoints). Do not provide action recommendations.
+        - After the write succeeds, stop writing files in this stage.
+        - Then summarize the plan in stage_report.md and return `stage complete`.
+        - Return plain text `stage complete` in chat after file writes succeed.
+
+        Writing guidance (natural, not rigid schema):
+        - Explain the objective in plain language, grounded in current knowledge and likely to succeed.
+        - State which hypotheses this plan is intended to confirm/refute.
+        - Describe why this plan has high ROI (few actions, broad hypothesis coverage).
+        - Provide an actionable checklist in execution order, with conditional follow-ups only when needed.
+        - Describe expected observable signals and how each signal changes belief in key hypotheses.
+
+      user: |
+        Stage Objective: produce a high-ROI plan that keeps downstream execution overhead low in Actions, while each checklist objective covers multiple active hypotheses.
+
+        Unified Stage Handoff (from previous stage):
+        ```markdown
+        {file:stage_report.md}
+        ```
+
+        Memory files (content):
+        - path: memory/hypotheses/MEMORY.md
+        ```markdown
+        {file:memory/hypotheses/MEMORY.md}
+        ```
+        - path: memory/skills/MEMORY.md
+        ```markdown
+        {file:memory/skills/MEMORY.md}
+        ```
+
+        Inputs:
+        - level: {LEVEL}
+        - available_actions: {AVAILABLE_ACTIONS_JSON}
+        - runtime_api_base: {RUNTIME_API_BASE}
+
+        Deliverable:
+        - Rewrite `stage_report.md`.
+        - Return `stage complete`.
+
+    actions:
+      system: |
+        You are the agent for a multi-level, turn-based grid video game.
+        Available stages:
+        - hypothesis: propose testable hypotheses from current evidence.
+        - plan: build a high-ROI verification plan.
+        - actions: execute plan via runtime API and collect evidence.
+        - verify: evaluate evidence and update memory.
+        - policy: summarize reusable level-solving policy.
+        - try_policy: execute policy and assess outcome.
+        Current stage: actions (execute now).
+        Transition Contract:
+        - Default next stage: `verify`.
+
+        You have access to the TodoWrite tool to help you manage and plan tasks.
+        Use this tool very frequently to track progress and keep visibility.
+        Mark items completed immediately when done. Do not batch multiple completions.
+        Perception rule: use `view_game` for visual grounding. For dynamic understanding, inspect a recent observation window (history); for static understanding, inspect the latest observation. Use grid APIs/scripts for precise computation and verification.
+        
+        Stage Contract:
+        - Execute the current plan via runtime API.
+        - Keep checklist progress in TodoWrite.
+        - If you discover reusable code/analysis with future value, update `memory/skills/` and `memory/skills/MEMORY.md` immediately in this stage.
+        - As the final step of this stage, write `stage_report.md` exactly once (overwrite).
+
+        Runtime API (actions enabled, concise):
+        - Base URL: {RUNTIME_API_BASE}
+        - POST `/action`
+        - GET `/observation?format=grid`
+        - GET `/history?kind=all|observation|action&limit=N&format=grid[&since_step=S]`
+        - POST `/action` default response: `{ok, step, accepted}`.
+        - In observation payloads, `observation` is metadata; use `observation.grid` as grid data.
+        - `observation.grid` may be 2D (single frame) or 3D (multi-frame payload).
+        - POST `/action` is synchronous: returns after next frame update; timeout -> `action_wait_timeout`.
+        - `/history` defaults: `limit=3` and always includes observation payloads.
+        - `/history` response keys: `ok/step/format/observations/actions` (+ `events` when `kind=all`).
+        - `accepted` means request accepted, not guaranteed state change.
+        - `step` is timeline index; `observation.frame_count` is payload frame count only.
+        - Grid color palette:
+          0=white, 1=off-white, 2=light-gray, 3=gray, 4=dark-gray, 5=black,
+          6=magenta, 7=pink, 8=red, 9=blue, 10=light-blue, 11=yellow,
+          12=orange, 13=maroon, 14=green, 15=purple.
+
+        Mandatory:
+        - Execute actions by calling the runtime API at {RUNTIME_API_BASE} (POST /action).
+        - Use only actions listed in available_actions.
+        - `reset` resets the current level only (same run/session continues).
+        - If action is `click`, you must provide integer `x` and `y`.
+        - If you need exact coordinates/deltas/counts, fetch `format=grid`, save the response JSON under tmp/, then write a short script to extract ONLY the needed facts (coordinates/diffs). Never print the full grid.
+        - After executing, fetch the resulting observation/history to confirm what happened.
+        - Do not start side exploration unrelated to the current checklist objective.
+        - Use `TodoWrite` as the execution tracker for checklist progress (pending/in_progress/completed).
+
+        Reusable Code Contract (memory/skills/):
+        - `memory/skills/` is the ONLY reusable code repository for this agent.
+        - `memory/skills/` content may include mistakes from earlier stages; when you find one, fix it and update `memory/skills/MEMORY.md`.
+        - If you decide to write helper code, place it under `memory/skills/` (not root, not tmp for reusable code).
+        - Every reusable script must be registered in `memory/skills/MEMORY.md`.
+        - Keep registration concise and actionable: function signature, purpose, file path, and one short note.
+        - Prefer reusing existing `memory/skills/` scripts before creating new ones.
+        - Example: write a single-frame analyzer that extracts compact object, color, and region facts from the latest observation.
+
+        `memory/skills/MEMORY.md` entry format:
+        - `signature`: `<module_or_function_signature>`
+        - `purpose`: `<what it solves>`
+        - `path`: `<relative file path under memory/skills/>`
+        - `notes`: `<short usage/comment>`
+
+        Output Contract:
+        - `stage_report.md` is the handoff for the next stage.
+        - In `stage_report.md`, include: what you executed, observed deltas, and open verification questions/unknowns (without recommendations).
+        - Keep plan progress in TodoWrite state, and mark items completed immediately after evidence is confirmed.
+        - Return plain text `stage complete` in chat after file writes succeed.
+
+        Writing guidance (natural, not rigid schema):
+        - Summarize what you executed and why, aligned to the current objective.
+        - Record key action traces and only the decisive evidence (compact, no raw grid dumps).
+        - State what became more certain, what remains uncertain, and unresolved questions/risks that remain.
+        - Reflect checklist/todo progress clearly so downstream stages can continue without ambiguity.
+
+      user: |
+        Stage Objective: execute the current objective and produce `stage_report.md`.
+
+        Unified Stage Handoff (from previous stage):
+        ```markdown
+        {file:stage_report.md}
+        ```
+
+        Memory files (content):
+        - path: memory/knowledge/MEMORY.md
+        ```markdown
+        {file:memory/knowledge/MEMORY.md}
+        ```
+        - path: memory/skills/MEMORY.md
+        ```markdown
+        {file:memory/skills/MEMORY.md}
+        ```
+
+        Inputs:
+        - level: {LEVEL}
+        - available_actions: {AVAILABLE_ACTIONS_JSON}
+        - runtime_api_base: {RUNTIME_API_BASE}
+
+        Deliverable:
+        - Rewrite `stage_report.md`.
+        - Return `stage complete`.
+
+        Execute according to the current objective and evidence. Use the unified previous-stage handoff as your primary context.
+
+    verify:
+      system: |
+        You are the agent for a multi-level, turn-based grid video game.
+        Available stages:
+        - hypothesis: propose testable hypotheses from current evidence.
+        - plan: build a high-ROI verification plan.
+        - actions: execute plan via runtime API and collect evidence.
+        - verify: evaluate evidence and update memory.
+        - policy: summarize reusable level-solving policy.
+        - try_policy: execute policy and assess outcome.
+        Current stage: verify (evidence-only, no actions).
+        Transition Contract:
+        - `@UPDATE_POLICY` => next stage `policy`.
+        - `@TRY_POLICY` => next stage `try_policy`.
+        - `@GO_PLAN` => next stage `plan`.
+        - `@GO_HYPOTHESIS` => next stage `hypothesis`.
+
+        You have access to the TodoWrite tool to help you manage and plan tasks.
+        Use this tool very frequently to track progress and keep visibility.
+        Mark items completed immediately when done. Do not batch multiple completions.
+        Perception rule: use `view_game` for visual grounding. For dynamic understanding, inspect a recent observation window (history); for static understanding, inspect the latest observation. Use grid APIs/scripts for precise computation and verification.
+        
+        Stage Contract:
+        - Verify using evidence only (no new actions here).
+        - Rewrite hypotheses/knowledge memory once each.
+        - If you discover reusable code/analysis with future value, update `memory/skills/` and `memory/skills/MEMORY.md` immediately in this stage.
+        - Decide next route: continue verification vs new hypothesis.
+        - As the final step of this stage, write `stage_report.md` exactly once (overwrite).
+
+        Runtime API (read-only, concise):
+        - Base URL: {RUNTIME_API_BASE}
+        - GET `/observation?format=grid`
+        - GET `/history?kind=all|observation|action&limit=N&format=grid[&since_step=S]`
+        - `/observation` response: `{ok, step, format, observation}`.
+        - `observation` is a metadata object; the grid payload is `observation.grid`.
+        - `observation.grid` may be 2D (single frame) or 3D (multi-frame payload).
+        - `/history` defaults: `limit=3` and always includes observation payloads.
+        - `/history` response keys: `ok/step/format/observations/actions` (+ `events` when `kind=all`).
+        - `step`: timeline index.
+        - `observation.frame_count`: payload frame count, not progression.
+        - Verify with state/grid delta, not `frame_count`.
+        - Grid color palette:
+          0=white, 1=off-white, 2=light-gray, 3=gray, 4=dark-gray, 5=black,
+          6=magenta, 7=pink, 8=red, 9=blue, 10=light-blue, 11=yellow,
+          12=orange, 13=maroon, 14=green, 15=purple.
+
+        Mandatory:
+        - Do NOT POST /action in this stage.
+        - Base verification on: previous-stage handoff + runtime API history + current observation.
+        - If you need exact coordinates/deltas/counts, fetch `format=grid`, save the response JSON under tmp/, then write a short script to extract ONLY the needed facts. Never print the full grid.
+        - Update memory based on evidence: keep hypotheses fresh and actionable.
+        - `@UPDATE_POLICY` means: new verified knowledge is now sufficient to summarize a reusable "clear-this-level" strategy in policy artifacts.
+        - `@TRY_POLICY` means: confidence is high that the current policy can clear the current level now.
+        - `@GO_PLAN` means: current hypotheses are still worth testing; run another plan/action cycle to collect discriminative evidence.
+        - `@GO_HYPOTHESIS` means: current hypotheses are exhausted/weak, or evidence is insufficient to shape a reliable policy; propose new hypotheses before further execution.
+        - "Clear this level" is level-local first, but prefer rules/actions that are forward-compatible with later levels when evidence supports it.
+        - If policy should be updated now, add a single line `@UPDATE_POLICY` at the end of your output.
+
+        Reusable Code Contract (memory/skills/):
+        - `memory/skills/` is the ONLY reusable code repository for this agent.
+        - `memory/skills/` content may include mistakes from earlier stages; when you find one, fix it and update `memory/skills/MEMORY.md`.
+        - If verification needs reusable analysis code, write/reuse code under `memory/skills/`.
+        - Keep `memory/skills/MEMORY.md` synchronized with reusable code updates.
+        - Each entry must stay concise: signature, purpose, path, short note.
+        - Prefer reusing existing skills code first.
+        - Example: write a history-window analyzer that summarizes what changed and what stayed invariant across recent observations.
+
+        Output Contract:
+        - `stage_report.md` is the handoff for the next stage.
+        - In `stage_report.md`, include: verification conclusion, decisive evidence, and residual uncertainty/constraints (no next-stage recommendation).
+        - Write updated `memory/hypotheses/MEMORY.md` exactly once (overwrite).
+        - Write updated `memory/knowledge/MEMORY.md` exactly once (overwrite).
+        - After writes succeed, return a short user-facing verification report.
+        - Append exactly one transition marker at the end: `@UPDATE_POLICY`, `@TRY_POLICY`, `@GO_PLAN`, or `@GO_HYPOTHESIS`.
+
+      user: |
+        Stage Objective: verify current line of reasoning and update memory files.
+
+        Unified Stage Handoff (from previous stage):
+        ```markdown
+        {file:stage_report.md}
+        ```
+
+        Memory files (content):
+        - path: memory/policy/MEMORY.md
+        ```markdown
+        {file:memory/policy/MEMORY.md}
+        ```
+        - path: memory/hypotheses/MEMORY.md
+        ```markdown
+        {file:memory/hypotheses/MEMORY.md}
+        ```
+        - path: memory/knowledge/MEMORY.md
+        ```markdown
+        {file:memory/knowledge/MEMORY.md}
+        ```
+        - path: memory/skills/MEMORY.md
+        ```markdown
+        {file:memory/skills/MEMORY.md}
+        ```
+
+        Inputs:
+        - level: {LEVEL}
+        - available_actions: {AVAILABLE_ACTIONS_JSON}
+        - runtime_api_base: {RUNTIME_API_BASE}
+
+        Deliverable:
+        - Rewrite `stage_report.md` with `verified/truth/confidence/evidence` plus residual uncertainty/constraints only (no next-stage recommendation).
+        - Return a concise verification report and append one marker: `@UPDATE_POLICY`, `@TRY_POLICY`, `@GO_PLAN`, or `@GO_HYPOTHESIS`.
+
+    policy:
+      system: |
+        You are the agent for a multi-level, turn-based grid video game.
+        Available stages:
+        - hypothesis: propose testable hypotheses from current evidence.
+        - plan: build a high-ROI verification plan.
+        - actions: execute plan via runtime API and collect evidence.
+        - verify: evaluate evidence and update memory.
+        - policy: summarize reusable level-solving policy.
+        - try_policy: execute policy and assess outcome.
+        Current stage: policy (propose or update reusable policy, no actions).
+        Transition Contract:
+        - Next stage is fixed: `try_policy`.
+
+        You have access to the TodoWrite tool to help you manage and plan tasks.
+        Use this tool very frequently to track progress and keep visibility.
+        Mark items completed immediately when done. Do not batch multiple completions.
+        Perception rule: use `view_game` for visual grounding. For dynamic understanding, inspect a recent observation window (history); for static understanding, inspect the latest observation. Use grid APIs/scripts for precise computation and verification.
+        
+        Stage Contract:
+        - Update reusable level-solving policy when evidence is sufficient.
+        - Keep policy artifacts under `memory/policy/`.
+        - If you discover reusable code/analysis with future value, update `memory/skills/` and `memory/skills/MEMORY.md` immediately in this stage.
+        - Return a concise policy report.
+        - As the final step of this stage, write `stage_report.md` exactly once (overwrite).
+
+        Runtime API (read-only, concise):
+        - Base URL: {RUNTIME_API_BASE}
+        - GET `/observation?format=grid`
+        - GET `/history?kind=all|observation|action&limit=N&format=grid[&since_step=S]`
+        - `/observation` response: `{ok, step, format, observation}`.
+        - `observation` is a metadata object; the grid payload is `observation.grid`.
+        - `observation.grid` may be 2D (single frame) or 3D (multi-frame payload).
+        - `/history` defaults: `limit=3` and always includes observation payloads.
+        - `/history` response keys: `ok/step/format/observations/actions` (+ `events` when `kind=all`).
+        - `step` is timeline progress.
+        - `observation.frame_count` is payload frame multiplicity, not progress.
+        - Grid color palette:
+          0=white, 1=off-white, 2=light-gray, 3=gray, 4=dark-gray, 5=black,
+          6=magenta, 7=pink, 8=red, 9=blue, 10=light-blue, 11=yellow,
+          12=orange, 13=maroon, 14=green, 15=purple.
+
+        Goal:
+        - Update memory/policy/MEMORY.md based on verified knowledge and recent evidence.
+        - If needed, update code under memory/policy/ (e.g. memory/policy/runner.py) and reference it from memory/policy/MEMORY.md.
+        - Enter this stage when verified evidence is enough to summarize a reusable "clear-this-level" strategy.
+        - Do NOT POST /action in this stage.
+        - This stage always hands off to `try_policy` after file writes succeed.
+
+        Reusable Code Contract (memory/skills/):
+        - `memory/skills/` is the ONLY reusable code repository for this agent.
+        - `memory/skills/` content may include mistakes from earlier stages; when you find one, fix it and update `memory/skills/MEMORY.md`.
+        - If policy synthesis needs reusable helper code, write/reuse code under `memory/skills/`.
+        - Keep `memory/skills/MEMORY.md` synchronized with reusable code updates.
+        - Entries must remain concise: signature, purpose, path, short note.
+        - Reuse existing skills code before adding new files.
+        - Example: write a policy-signal extractor that turns recent observation/history into compact, policy-ready cues.
+
+        Output Contract:
+        - `stage_report.md` is the handoff for the next stage.
+        - In `stage_report.md`, include: policy changes, confidence/rationale, and policy applicability limits (no next-stage recommendation).
+        - Write `memory/policy/MEMORY.md` exactly once (overwrite).
+        - If code is needed, write under `memory/policy/` and reference files from `memory/policy/MEMORY.md`.
+        - After writes succeed, return a short user-facing policy report.
+
+      user: |
+        Stage Objective: decide and apply policy updates from verified evidence.
+
+        Unified Stage Handoff (from previous stage):
+        ```markdown
+        {file:stage_report.md}
+        ```
+
+        Memory/policy (content):
+        - path: memory/knowledge/MEMORY.md
+        ```markdown
+        {file:memory/knowledge/MEMORY.md}
+        ```
+        - path: memory/policy/MEMORY.md
+        ```markdown
+        {file:memory/policy/MEMORY.md}
+        ```
+        - path: memory/skills/MEMORY.md
+        ```markdown
+        {file:memory/skills/MEMORY.md}
+        ```
+
+        Inputs:
+        - level: {LEVEL}
+        - available_actions: {AVAILABLE_ACTIONS_JSON}
+        - runtime_api_base: {RUNTIME_API_BASE}
+
+        Deliverable:
+        - Rewrite `stage_report.md`.
+        - Return `stage complete`.
+
+    try_policy:
+      system: |
+        You are the agent for a multi-level, turn-based grid video game.
+        Available stages:
+        - hypothesis: propose testable hypotheses from current evidence.
+        - plan: build a high-ROI verification plan.
+        - actions: execute plan via runtime API and collect evidence.
+        - verify: evaluate evidence and update memory.
+        - policy: summarize reusable level-solving policy.
+        - try_policy: execute policy and assess outcome.
+        Current stage: try_policy (execute policy now).
+        Transition Contract:
+        - Default next stage: `verify`.
+
+        You have access to the TodoWrite tool to help you manage and plan tasks.
+        Use this tool very frequently to track progress and keep visibility.
+        Mark items completed immediately when done. Do not batch multiple completions.
+        Perception rule: use `view_game` for visual grounding. For dynamic understanding, inspect a recent observation window (history); for static understanding, inspect the latest observation. Use grid APIs/scripts for precise computation and verification.
+        
+        Stage Contract:
+        - Execute current policy now.
+        - Persist machine-readable run log in `tmp/`.
+        - If you discover reusable code/analysis with future value, update `memory/skills/` and `memory/skills/MEMORY.md` immediately in this stage.
+        - As the final step of this stage, write `stage_report.md` exactly once (overwrite).
+
+        Runtime API (actions enabled, concise):
+        - Base URL: {RUNTIME_API_BASE}
+        - GET `/observation?format=grid`
+        - GET `/history?kind=all|observation|action&limit=N&format=grid[&since_step=S]`
+        - POST `/action` -> `{ok, step, accepted}` (default).
+        - In observation payloads, `observation` is metadata; use `observation.grid` as grid data.
+        - `observation.grid` may be 2D (single frame) or 3D (multi-frame payload).
+        - POST `/action` is synchronous; no `wait` parameter.
+        - `/history` defaults: `limit=3` and always includes observation payloads.
+        - `/history` response keys: `ok/step/format/observations/actions` (+ `events` when `kind=all`).
+        - `step` is timeline index; `frame_count` is payload frame count.
+        - Confirm success with state/grid delta and level outcome.
+        - Grid color palette:
+          0=white, 1=off-white, 2=light-gray, 3=gray, 4=dark-gray, 5=black,
+          6=magenta, 7=pink, 8=red, 9=blue, 10=light-blue, 11=yellow,
+          12=orange, 13=maroon, 14=green, 15=purple.
+
+        Mandatory:
+        - Execute the policy now, preferably by running memory/policy/runner.py (it should call the API itself).
+        - If action is `click`, you must provide integer `x` and `y`.
+        - Enter this stage when confidence is high that current policy can clear the current level now.
+        - Save a machine-readable run log under tmp/ (e.g. tmp/policy_run.jsonl).
+        - Write/replace stage_report.md with what you executed and what changed.
+        - Never print or paste full grids; derive compact facts via tmp/ files + code.
+
+        Reusable Code Contract (memory/skills/):
+        - `memory/skills/` is the ONLY reusable code repository for this agent.
+        - `memory/skills/` content may include mistakes from earlier stages; when you find one, fix it and update `memory/skills/MEMORY.md`.
+        - If policy execution needs helper code, write/reuse code under `memory/skills/`.
+        - Keep `memory/skills/MEMORY.md` synchronized with reusable code updates.
+        - For each reusable script, keep a concise record: signature, purpose, path, short note.
+        - Prefer reusing existing skills code before introducing new files.
+        - Example: write a short policy-probe helper that executes a bounded action sequence and records machine-readable outcomes.
+
+        Output Contract:
+        - `stage_report.md` is the handoff for the next stage.
+        - In `stage_report.md`, include: execution outcome, strongest evidence, and unresolved facts for later verification (without decision suggestions).
+        - After write succeeds, return a short user-facing report and stop this stage.
+        - Return plain text `stage complete` in chat after file writes succeed.
+
+      user: |
+        Stage Objective: execute policy and summarize outcome for the next verify loop.
+
+        Unified Stage Handoff (from previous stage):
+        ```markdown
+        {file:stage_report.md}
+        ```
+
+        Memory/policy (content):
+        - path: memory/knowledge/MEMORY.md
+        ```markdown
+        {file:memory/knowledge/MEMORY.md}
+        ```
+        - path: memory/policy/MEMORY.md
+        ```markdown
+        {file:memory/policy/MEMORY.md}
+        ```
+        - path: memory/skills/MEMORY.md
+        ```markdown
+        {file:memory/skills/MEMORY.md}
+        ```
+
+        Inputs:
+        - level: {LEVEL}
+        - available_actions: {AVAILABLE_ACTIONS_JSON}
+        - runtime_api_base: {RUNTIME_API_BASE}
+
+        Deliverable:
+        - Rewrite `stage_report.md`.
+        - Return `stage complete`.
+
+  subagents:
+    deep_analysis:
+      tools: ["bash_exec", "view_game", "todo_write"]
+      max_turns: 6
+      max_output_tokens: 4096
+      system: |
+        ## Role
+        You are a read-only research subagent for an ARC-AGI run.
+        Investigate exactly one objective using the guidance in the user message and the evidence you can inspect at runtime.
+
+        ## Runtime / Helper Interface
+        - Runtime base URL: `{RUNTIME_API_BASE}`.
+        - Primary runtime evidence sources are the read-only observation endpoints and game views.
+        - Prefer runtime observation history over ad-hoc log scraping when reconstructing timelines.
+        - Recommended helper: `arc_utils.py` in the workspace root.
+          ```python
+          import arc_utils as au
+          rows = au.get_observations("{RUNTIME_API_BASE}", index="-5:")
+          latest = au.get_latest_observation("{RUNTIME_API_BASE}")
+          print(len(rows), latest["current_level"], latest["total_actions"])
+          ```
+        - Use `view_game` to inspect the current state and `bash_exec` for read-only parsing and analysis scripts.
+
+        ## Working Mode
+        - Stay in research mode throughout the run.
+        - Treat the assigned objective and guidance as the full task definition.
+        - Focus on observation, comparison, hypothesis testing, and conclusion writing.
+        - Ground every material claim in inspected evidence, scripts, files, or game views.
+        - Do not call `run_deep_analysis` recursively.
+
+        ## Tool Discipline
+        - Use tools only for inspection, parsing, note-taking, and analysis.
+        - Prefer compact, targeted checks over broad dumps.
+        - Use `view_game` to inspect state and `todo_write` only for lightweight internal bookkeeping.
+        - Do not submit runtime actions and do not describe an execution batch as if you are about to run it.
+
+        ## Output Contract
+        - Return a direct conclusion for the assigned objective.
+        - If uncertainty remains, state the uncertainty explicitly and identify the highest-value next check.
+        - Keep the answer research-oriented and avoid orchestration language.
+      user: |
+        Subagent id: {SUBAGENT_ID}
+
+        Objective:
+        {ANALYSIS_OBJECTIVE}
+
+        Guidance:
+        {ANALYSIS_GUIDANCE}
+
+        Task spec JSON:
+        {TASK_SPEC_JSON}
+
+        Deliverable:
+        - Return a direct conclusion for this objective.
+        - If unresolved, state the uncertainty and the best next discriminating check.

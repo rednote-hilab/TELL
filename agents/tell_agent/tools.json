@@ -1,0 +1,205 @@
+{
+  "tools": [
+    {
+      "name": "bash_exec",
+      "description": "Run bash command in the agent workspace only. Absolute paths and parent traversal are blocked.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Session identifier for command continuity."
+          },
+          "exec_dir": {
+            "type": "string",
+            "description": "Optional relative directory inside workspace."
+          },
+          "command": {
+            "type": "string",
+            "description": "Command to execute."
+          }
+        },
+        "required": ["command"]
+      }
+    },
+    {
+      "name": "view_game",
+      "description": "Render a selected observation window from runtime history. Returns PNG for single-frame view, MP4 for dynamic multi-frame window. Use video when tracking motion/change, and single frame when inspecting static details.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "from_before": {
+            "type": "integer",
+            "description": "Older bound offset from latest observation. 0 means latest."
+          },
+          "to_before": {
+            "type": "integer",
+            "description": "Newer bound offset from latest observation. 0 means latest."
+          },
+          "include_actions": {
+            "type": "boolean",
+            "description": "Include actions aligned with selected observation steps."
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "todo_write",
+      "description": "Update todos from the input array: add when id is new, overwrite when id exists.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "todos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed",
+                    "cancelled"
+                  ]
+                },
+                "priority": {
+                  "type": "string",
+                  "enum": [
+                    "high",
+                    "medium",
+                    "low"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "content",
+                "status",
+                "priority"
+              ]
+            }
+          }
+        },
+        "required": ["todos"]
+      }
+    },
+    {
+      "name": "read_file",
+      "description": "Read a file or directory in the workspace. Supports line offsets and limits and returns line-numbered output for files.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Workspace-relative path to a file or directory."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "1-indexed starting line or entry offset."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of lines or directory entries to return."
+          }
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "grep_text",
+      "description": "Search file contents in the workspace using ripgrep. Prefer this over shell grep for targeted text search.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Regex or literal search pattern."
+          },
+          "path": {
+            "type": "string",
+            "description": "Workspace-relative search root. Defaults to the workspace root."
+          },
+          "include": {
+            "type": "string",
+            "description": "Optional glob filter such as '*.py'."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of matches to return."
+          }
+        },
+        "required": ["pattern"]
+      }
+    },
+    {
+      "name": "list_dir",
+      "description": "List a workspace directory with stable ordering and entry offsets.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Workspace-relative directory path."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "1-indexed starting entry offset."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of directory entries to return."
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "run_deep_analysis",
+      "description": "Fan out multiple deep-analysis subagents in parallel. The caller provides one objective and one guidance per subagent. Put all needed context and target framing inside guidance.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "subagents": {
+            "type": "array",
+            "description": "Subagent spec list. Each entry runs in its own deep-analysis lane.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "subagent_id": {
+                  "type": "string",
+                  "description": "Optional stable identifier for the subagent lane."
+                },
+                "objective": {
+                  "type": "string",
+                  "description": "What this subagent must achieve or answer."
+                },
+                "guidance": {
+                  "type": "string",
+                  "description": "How this subagent should approach the objective. Include all necessary context, constraints, and target framing here."
+                },
+                "task_spec": {
+                  "type": "object",
+                  "description": "Optional structured task metadata passed to the subagent prompt."
+                }
+              },
+              "required": ["objective", "guidance"]
+            }
+          },
+          "task_spec": {
+            "type": "object",
+            "description": "Optional shared task metadata merged into every subagent."
+          }
+        },
+        "required": ["subagents"]
+      }
+    }
+  ]
+}

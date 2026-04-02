@@ -1,0 +1,230 @@
+# ruff: noqa: E402
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=".env.example")
+load_dotenv(dotenv_path=".env", override=True)
+
+import argparse
+import json
+import logging
+import os
+import signal
+import sys
+import threading
+import time
+from functools import partial
+from types import FrameType
+from typing import Optional
+from agents import AVAILABLE_AGENTS, Swarm
+from agents.tracing import initialize as init_agentops
+
+logger = logging.getLogger()
+
+SCHEME = os.environ.get("SCHEME", "http")
+HOST = os.environ.get("HOST", "localhost")
+PORT = os.environ.get("PORT", 8001)
+
+# Hide standard ports in URL
+if (SCHEME == "http" and str(PORT) == "80") or (
+    SCHEME == "https" and str(PORT) == "443"
+):
+    ROOT_URL = f"{SCHEME}://{HOST}"
+else:
+    ROOT_URL = f"{SCHEME}://{HOST}:{PORT}"
+HEADERS = {
+    "X-API-Key": os.getenv("ARC_API_KEY", ""),
+    "Accept": "application/json",
+}
+
+
+def run_agent(swarm: Swarm) -> None:
+    swarm.main()
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+def cleanup(
+    swarm: Swarm,
+    signum: Optional[int],
+    frame: Optional[FrameType],
+) -> None:
+    logger.info("Received SIGINT, exiting...")
+    if not swarm.local:
+        card_id = swarm.card_id
+        if card_id:
+            scorecard = swarm.close_scorecard(card_id)
+            if scorecard:
+                logger.info("--- EXISTING SCORECARD REPORT ---")
+                logger.info(json.dumps(scorecard.model_dump(), indent=2))
+                swarm.cleanup(scorecard)
+
+            # Provide web link to scorecard
+            if card_id:
+                scorecard_url = f"{ROOT_URL}/scorecards/{card_id}"
+                logger.info(f"View your scorecard online: {scorecard_url}")
+    else:
+        swarm.cleanup(None)
+
+    sys.exit(0)
+
+
+def main() -> None:
+    log_level = logging.INFO
+    if os.environ.get("DEBUG", "False") == "True":
+        log_level = logging.DEBUG
+
+    logger.setLevel(log_level)
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(log_level)
+    stdout_handler.setFormatter(formatter)
+
+    log_dir = os.getenv("LOG_DIR", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    run_id = os.getenv("LOG_RUN_ID")
+    if not run_id:
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        if os.getenv("AGENT_NAME"):
+            run_id = f"{os.getenv('AGENT_NAME')}-{run_id}"
+    log_file = os.path.join(log_dir, f"{run_id}.log")
+    file_handler = logging.FileHandler(log_file, mode="w")
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(stdout_handler)
+
+    # Unified replay JSON for log viewer
+    replay_dir = os.path.join(log_dir, "replays")
+    os.makedirs(replay_dir, exist_ok=True)
+    replay_file = os.path.join(replay_dir, f"{run_id}.replay.json")
+    os.environ["LOG_REPLAY_FILE"] = replay_file
+
+    # logging.getLogger("requests").setLevel(logging.CRITICAL)
+    # logging.getLogger("werkzeug").setLevel(logging.CRITICAL)
+
+    parser = argparse.ArgumentParser(description="ARC-AGI Agents")
+    available_agent_names = sorted(AVAILABLE_AGENTS.keys())
+    parser.add_argument(
+        "-a",
+        "--agent",
+        choices=available_agent_names,
+        help="Choose which agent to run.",
+    )
+    parser.add_argument(
+        "-g",
+        "--game",
+        help="Choose a specific game_id for the agent to play. If none specified, an agent swarm will play all available games.",
+    )
+    parser.add_argument(
+        "-t",
+        "--tags",
+        type=str,
+        help="Comma-separated list of tags for the scorecard (e.g., 'experiment,v1.0')",
+        default=None,
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Run against local environment files instead of the API.",
+    )
+    parser.add_argument(
+        "--env-dir",
+        type=str,
+        default=None,
+        help="Local environments directory (used with --local).",
+    )
+    args = parser.parse_args()
+
+    if not args.agent:
+        logger.error("An Agent must be specified")
+        return
+
+    os.environ.setdefault("AGENT_NAME", args.agent)
+
+    if args.local:
+        print("Using local environments (offline mode).")
+    else:
+        print(f"{ROOT_URL}/api/games")
+
+    logger.info(f"Log file: {log_file}")
+    logger.info(f"Replay log file: {replay_file}")
+
+    full_games = Swarm.discover_games(
+        root_url=ROOT_URL,
+        headers=HEADERS,
+        local=args.local,
+        env_dir=args.env_dir,
+    )
+
+    # For playback agents, we can derive the game from the recording filename
+    if not full_games and args.agent and args.agent.endswith(".recording.jsonl"):
+        from agents.recorder import Recorder
+
+        game_prefix = Recorder.get_prefix_one(args.agent)
+        full_games = [game_prefix]
+        logger.info(
+            f"Using game '{game_prefix}' derived from playback recording filename"
+        )
+    games = full_games[:]
+    if args.game:
+        filters = args.game.split(",")
+        games = [
+            gid
+            for gid in full_games
+            if any(gid.startswith(prefix) for prefix in filters)
+        ]
+
+    logger.info(f"Game list: {games}")
+
+    if not games:
+        if full_games:
+            logger.error(
+                f"The specified game '{args.game}' does not exist or is not available with your API key. Please try a different game."
+            )
+        else:
+            logger.error(
+                "No games available to play. Check API connection or recording file."
+            )
+        return
+
+    # Start with Empty tags, "agent" and agent name will be added by the Swarm later
+    tags: list[str] = []
+
+    # Append user-provided tags if any
+    if args.tags:
+        user_tags = [tag.strip() for tag in args.tags.split(",")]
+        tags.extend(user_tags)
+
+    # Initialize AgentOps client
+    init_agentops(api_key=os.getenv("AGENTOPS_API_KEY"), log_level=log_level)
+
+    swarm = Swarm(
+        args.agent,
+        ROOT_URL,
+        games,
+        tags=tags,  # Pass tags as keyword argument
+        local=args.local,
+        env_dir=args.env_dir,
+    )
+    agent_thread = threading.Thread(target=partial(run_agent, swarm))
+    agent_thread.daemon = True  # die when the main thread dies
+    agent_thread.start()
+
+    signal.signal(signal.SIGINT, partial(cleanup, swarm))  # handler for Ctrl+C
+
+    try:
+        # Wait for the agent thread to complete
+        while agent_thread.is_alive():
+            agent_thread.join(timeout=5)  # Check every 5 second
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received in main thread")
+        cleanup(swarm, signal.SIGINT, None)
+    except Exception as e:
+        logger.error(f"Unexpected error in main thread: {e}")
+        cleanup(swarm, None, None)
+
+
+if __name__ == "__main__":
+    os.environ["TESTING"] = "False"
+    main()

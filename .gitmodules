@@ -1,0 +1,6 @@
+[submodule "ARC-AGI"]
+	path = ARC-AGI
+	url = https://github.com/arcprize/ARC-AGI.git
+[submodule "ARCEngine"]
+	path = ARCEngine
+	url = https://github.com/arcprize/ARCEngine.git
