@@ -124,7 +124,7 @@ bash run_all_tasks.sh --config agents/tell_agent/configs/prior_memory.yaml
 
 The cleaned memories in `agents/tell_agent/prior_memory/` were produced by taking the final `MEMORY.md` from each baseline game and stripping level-specific data (coordinates, solutions, action sequences) with an LLM — **delete only, never rewrite**. See `CLEANING_PROMPT.md` in that directory for the exact cleaning instructions.
 
-On co-completed levels, prior memory reduces total actions by ~51%. See the report for details.
+On co-completed levels, prior memory reduces total actions by ~29%. See the report for details.
 
 ## Configuration
 
