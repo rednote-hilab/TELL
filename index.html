@@ -89,11 +89,11 @@ footer{padding:40px 0;text-align:center;color:#bbb;font-size:12px;border-top:1px
 /* Language toggle */
 body.lang-en .lang-zh{display:none!important}
 body.lang-zh .lang-en{display:none!important}
-.lang-switch{position:absolute;top:0;right:0;display:flex;gap:0;font-size:13px;font-weight:500}
-.lang-switch button{background:none;border:1px solid #e5e5e5;padding:4px 12px;cursor:pointer;color:#999;font-family:inherit;font-size:13px;transition:all 150ms}
-.lang-switch button:first-child{border-radius:2px 0 0 2px;border-right:none}
-.lang-switch button:last-child{border-radius:0 2px 2px 0}
-.lang-switch button.active{color:#1a1a1a;border-color:#1a1a1a;font-weight:700}
+.lang-switch{position:absolute;top:4px;right:0;display:flex;gap:0;font-size:12px;font-weight:500;z-index:10}
+.lang-switch button{background:none;border:1px solid #e5e5e5;padding:3px 10px;cursor:pointer;color:#999;font-family:inherit;font-size:12px;transition:all 150ms}
+.lang-switch button:first-child{border-radius:2px 0 0 2px}
+.lang-switch button:last-child{border-radius:0 2px 2px 0;margin-left:-1px}
+.lang-switch button.active{color:#1a1a1a;border-color:#1a1a1a;font-weight:700;position:relative;z-index:1}
 
 /* Aha moment cards */
 .aha-cards{display:flex;flex-direction:column;gap:28px}
